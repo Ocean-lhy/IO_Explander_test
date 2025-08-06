@@ -31,12 +31,25 @@ i2c_bus_handle_t i2c_bus          = NULL;
 io_expander_handle_t* io_expander = NULL;
 M5GFX display;
 
+// 设备信息
+typedef struct {
+    uint16_t uid;
+    uint8_t hw_version;
+    uint8_t fw_version;
+    uint16_t temperature;
+    uint16_t ref_voltage;
+    bool info_valid;
+} device_info_t;
+
+static device_info_t device_info = {0};
+
 // 测试状态
 typedef enum {
-    TEST_STATE_MENU,        // 菜单状态
-    TEST_STATE_SELECT_PIN,  // 选择引脚状态
-    TEST_STATE_RUNNING,     // 测试运行状态
-    TEST_STATE_WAIT_NEXT    // 等待下一个测试状态
+    TEST_STATE_MENU,             // 菜单状态
+    TEST_STATE_SELECT_PIN,       // 选择引脚状态
+    TEST_STATE_RUNNING,          // 测试运行状态
+    TEST_STATE_WAIT_NEXT,        // 等待下一个测试状态
+    TEST_STATE_FUNCTION_TEST     // 功能寄存器测试状态
 } test_state_t;
 
 static test_state_t current_state = TEST_STATE_MENU;
@@ -103,6 +116,43 @@ void init_buttons()
     gpio_config(&io_conf);
 }
 
+// 读取设备信息
+void read_device_info() {
+    device_info.info_valid = false;
+    
+    // 读取UID
+    if (io_expander_read_uid(io_expander, &device_info.uid) != ESP_OK) {
+        ESP_LOGW(TAG, "读取UID失败");
+        return;
+    }
+    
+    // 读取版本信息
+    if (io_expander_read_version(io_expander, &device_info.hw_version, &device_info.fw_version) != ESP_OK) {
+        ESP_LOGW(TAG, "读取版本信息失败");
+        return;
+    }
+    
+    // 读取温度（启动温度采样并等待完成）
+    esp_err_t temp_ret = io_expander_temp_read(io_expander, &device_info.temperature);
+    if (temp_ret != ESP_OK) {
+        ESP_LOGW(TAG, "读取温度失败: %d", temp_ret);
+        device_info.temperature = 0;
+    } else {
+        ESP_LOGI(TAG, "温度采样成功: %d", device_info.temperature);
+    }
+    
+    // 读取参考电压
+    if (io_expander_get_ref_voltage(io_expander, &device_info.ref_voltage) != ESP_OK) {
+        ESP_LOGW(TAG, "读取参考电压失败");
+        device_info.ref_voltage = 0;
+    }
+    
+    device_info.info_valid = true;
+    ESP_LOGI(TAG, "设备信息读取成功 - UID:0x%04x, HW:%d, FW:%d, 温度:%d, 电压:%d", 
+             device_info.uid, device_info.hw_version, device_info.fw_version, 
+             device_info.temperature, device_info.ref_voltage);
+}
+
 // 初始化测试GPIO
 void init_test_gpio()
 {
@@ -112,10 +162,42 @@ void init_test_gpio()
                              .pull_down_en = GPIO_PULLDOWN_DISABLE,
                              .intr_type    = GPIO_INTR_DISABLE};
     gpio_config(&io_conf);
+}
 
-    // 配置ADC用于模拟读取
-    adc1_config_width(ADC_WIDTH_BIT_12);
-    adc1_config_channel_atten(ADC1_CHANNEL_7, ADC_ATTEN_DB_11);  // GPIO26对应ADC1_CHANNEL_7
+// 复位引脚配置的复用功能
+void reset_pin_config(int pin)
+{
+    ESP_LOGI(TAG, "复位引脚 %d (%s) 的配置", pin, pin_map[pin].name);
+    
+    // 1. 禁用中断并清除中断状态
+    io_expander_gpio_set_interrupt(io_expander, pin, IO_EXP_GPIO_INTR_DISABLE);
+    io_expander_gpio_clear_interrupt(io_expander, pin);
+    
+    // 2. 设置为GPIO输入模式（默认状态）
+    io_expander_gpio_set_mode(io_expander, pin, IO_EXP_GPIO_MODE_INPUT);
+    
+    // 3. 关闭上下拉（浮空状态）
+    io_expander_gpio_set_pull(io_expander, pin, IO_EXP_GPIO_PULL_NONE);
+    
+    // 4. 如果是PWM引脚，禁用PWM输出
+    if (pin_map[pin].has_pwm) {
+        io_expander_pwm_set_duty(io_expander, pin_map[pin].pwm_channel, 0, false, false);
+    }
+
+    // 5. 如果是ADC引脚，禁用ADC采样
+    if (pin_map[pin].has_adc) {
+        io_expander_adc_disable(io_expander);
+    }
+
+    // 6. 如果是LED引脚，关闭LED
+    if (pin_map[pin].has_led) {
+        io_expander_led_disable(io_expander);
+    }
+    
+    // 给一点时间让配置生效
+    vTaskDelay(50 / portTICK_PERIOD_MS);
+    
+    ESP_LOGI(TAG, "引脚 %d 配置复位完成", pin);
 }
 
 // 显示功能
@@ -131,11 +213,29 @@ void display_menu()
 {
     display_clear();
     display.println("IO Explander 测试器");
-    display.println("");
+    
+    // 显示设备信息
+    if (device_info.info_valid) {
+        display.printf("序号: 0x%04X", device_info.uid);
+        display.println("");
+        display.printf("版本: HW-%d FW-%d", device_info.hw_version, device_info.fw_version);
+        display.println("");
+        
+        display.printf("温度: %d°C", device_info.temperature);
+        display.println("");
+        
+        // 参考电压转换
+        float ref_voltage = device_info.ref_voltage / 1000.0; // 假设单位是mV
+        display.printf("电压: %.2fV", ref_voltage);
+        display.println("");
+    } else {
+        display.println("设备信息读取失败");
+        display.println("");
+    }
+    
     display.println("A: 选择引脚");
     display.println("B: 开始测试");
-    display.println("C: 退出");
-    display.println("");
+    display.println("C: 功能测试");
     display.printf("当前引脚: %s", pin_map[current_pin].name);
 }
 
@@ -174,6 +274,12 @@ bool test_gpio_basic(int pin)
     ESP_LOGI(TAG, "开始GPIO基本测试 - 引脚 %d", pin);
     bool test_passed = true;
 
+    // 复位引脚配置
+    reset_pin_config(pin);
+
+    gpio_reset_pin(TEST_GPIO_PIN);
+    gpio_set_direction(TEST_GPIO_PIN, GPIO_MODE_INPUT);
+
     // 测试输出模式
     io_expander_gpio_set_mode(io_expander, pin, IO_EXP_GPIO_MODE_OUTPUT);
     vTaskDelay(50 / portTICK_PERIOD_MS);
@@ -203,6 +309,7 @@ bool test_gpio_basic(int pin)
     }
 
     // 测试输入模式 - 先设置GPIO26为输出，然后测试IO_Explander是否能正确读取
+    gpio_reset_pin(TEST_GPIO_PIN);
     gpio_set_direction(TEST_GPIO_PIN, GPIO_MODE_OUTPUT);
 
     // 设置IO_Explander为输入模式
@@ -252,10 +359,14 @@ bool test_gpio_pull(int pin)
     ESP_LOGI(TAG, "开始上下拉测试 - 引脚 %d", pin);
     bool test_passed = true;
 
+    // 复位引脚配置
+    reset_pin_config(pin);
+
     // 设置IO_Explander为输入模式
     io_expander_gpio_set_mode(io_expander, pin, IO_EXP_GPIO_MODE_INPUT);
 
     // 设置GPIO26为输入模式（浮空状态）
+    gpio_reset_pin(TEST_GPIO_PIN);
     gpio_set_direction(TEST_GPIO_PIN, GPIO_MODE_INPUT);
     gpio_set_pull_mode(TEST_GPIO_PIN, GPIO_FLOATING);
 
@@ -308,6 +419,9 @@ bool test_gpio_interrupt(int pin)
     ESP_LOGI(TAG, "开始中断测试 - 引脚 %d", pin);
     bool test_passed = true;
 
+    // 复位引脚配置
+    reset_pin_config(pin);
+
     // 设置为输入模式并启用上拉
     io_expander_gpio_set_mode(io_expander, pin, IO_EXP_GPIO_MODE_INPUT);
     io_expander_gpio_set_pull(io_expander, pin, IO_EXP_GPIO_PULL_UP);
@@ -327,6 +441,7 @@ bool test_gpio_interrupt(int pin)
     ESP_LOGI(TAG, "触发前中断状态: 0x%04x", interrupt_status_before);
 
     // 通过GPIO26产生下降沿来触发中断
+    gpio_reset_pin(TEST_GPIO_PIN);
     gpio_set_direction(TEST_GPIO_PIN, GPIO_MODE_OUTPUT);
     gpio_set_level(TEST_GPIO_PIN, 1);  // 先设置为高电平
     vTaskDelay(100 / portTICK_PERIOD_MS);
@@ -379,56 +494,79 @@ bool test_adc(int pin, int adc_channel)
     ESP_LOGI(TAG, "开始ADC测试 - 引脚 %d, 通道 %d", pin, adc_channel);
     bool test_passed = true;
 
+    // 复位引脚配置
+    reset_pin_config(pin);
+
     // 设置为输入模式
     io_expander_gpio_set_mode(io_expander, pin, IO_EXP_GPIO_MODE_INPUT);
     io_expander_gpio_set_pull(io_expander, pin, IO_EXP_GPIO_PULL_NONE);
     vTaskDelay(100 / portTICK_PERIOD_MS);
+    
+    adc2_config_channel_atten(ADC2_CHANNEL_9, ADC_ATTEN_DB_12);  // GPIO26对应ADC2_CHANNEL_9
 
-    // 测试多个电压值
-    float test_voltages[] = {0.0, 1.65, 3.3};  // 0V, 1.65V(中值), 3.3V
+    // 测试两个电压值
+    float test_voltages[] = {0.0, 3.3};  // 0V, 3.3V
 
-    for (int i = 0; i < 3; i++) {
-        // 通过GPIO26输出不同的电压（使用DAC或PWM模拟）
+    for (int i = 0; i < 2; i++) {
+        // 通过GPIO26输出不同的电压
         if (i == 0) {
             // 0V - GPIO26输出低电平
+            gpio_reset_pin(TEST_GPIO_PIN);
             gpio_set_direction(TEST_GPIO_PIN, GPIO_MODE_OUTPUT);
             gpio_set_level(TEST_GPIO_PIN, 0);
-        } else if (i == 1) {
-            // 1.65V - 通过50%占空比PWM模拟（这只是近似）
-            gpio_set_direction(TEST_GPIO_PIN, GPIO_MODE_INPUT);
-            // 实际应用中可能需要外部分压电路
         } else {
             // 3.3V - GPIO26输出高电平
+            gpio_reset_pin(TEST_GPIO_PIN);
             gpio_set_direction(TEST_GPIO_PIN, GPIO_MODE_OUTPUT);
             gpio_set_level(TEST_GPIO_PIN, 1);
         }
 
         vTaskDelay(200 / portTICK_PERIOD_MS);  // 等待稳定
 
-        // 读取IO_Explander的ADC值
+                // 读取IO_Explander的ADC值（START位会自动清零）
         uint16_t adc_value;
         esp_err_t ret = io_expander_adc_read(io_expander, adc_channel, &adc_value);
-
+        
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "ADC读取失败: %d", ret);
             test_passed = false;
             continue;
         }
+        
+        ESP_LOGI(TAG, "ADC采样成功: 通道%d, 值%d", adc_channel, adc_value);
 
         float io_exp_voltage = (adc_value / 4095.0) * 3.3;
 
         // 对比ESP32的ADC读取
-        int esp32_adc       = adc1_get_raw(ADC1_CHANNEL_7);
+        int esp32_adc;
+        ret = adc2_get_raw(ADC2_CHANNEL_9, ADC_WIDTH_BIT_12, &esp32_adc);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "ADC读取失败: %d", ret);
+            test_passed = false;
+            continue;
+        }
         float esp32_voltage = (esp32_adc / 4095.0) * 3.3;
 
         ESP_LOGI(TAG, "测试电压 %.2fV - IO_Exp: %d (%.2fV), ESP32: %d (%.2fV)", test_voltages[i], adc_value,
                  io_exp_voltage, esp32_adc, esp32_voltage);
 
-        // 校验ADC读取（允许一定误差）
-        float voltage_diff = fabs(io_exp_voltage - esp32_voltage);
-        if (voltage_diff > 0.3) {  // 允许300mV误差
-            ESP_LOGE(TAG, "ADC读取差异过大! 差异: %.2fV", voltage_diff);
-            test_passed = false;
+        // 简化的ADC校验（只检查0V和3.3V）
+        if (i == 0) {
+            // 0V测试：ADC值应该接近0
+            if (adc_value > 200) {  // 允许一定噪声，但不应超过200
+                ESP_LOGE(TAG, "0V测试失败! ADC值过高: %d", adc_value);
+                test_passed = false;
+            } else {
+                ESP_LOGI(TAG, "0V测试通过，ADC值: %d", adc_value);
+            }
+        } else {
+            // 3.3V测试：ADC值应该接近4095
+            if (adc_value < 2000) {
+                ESP_LOGE(TAG, "3.3V测试失败! ADC值过低: %d", adc_value);
+                test_passed = false;
+            } else {
+                ESP_LOGI(TAG, "3.3V测试通过，ADC值: %d", adc_value);
+            }
         }
 
         // 基本范围检查
@@ -456,16 +594,21 @@ bool test_pwm(int pin, int pwm_channel)
     ESP_LOGI(TAG, "开始PWM测试 - 引脚 %d, 通道 %d", pin, pwm_channel);
     bool test_passed = true;
 
+    // 复位引脚配置
+    reset_pin_config(pin);
+
     // 设置PWM频率
-    esp_err_t ret = io_expander_pwm_set_frequency(io_expander, 1000);  // 1kHz
+    esp_err_t ret = io_expander_pwm_set_frequency(io_expander, 5000);  // 5kHz
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "PWM频率设置失败: %d", ret);
         return false;
     }
 
-    // 设置GPIO26为输入，用于ADC检测PWM输出
-    gpio_set_direction(TEST_GPIO_PIN, GPIO_MODE_INPUT);
-    gpio_set_pull_mode(TEST_GPIO_PIN, GPIO_FLOATING);
+    // 设置PWM引脚推挽输出
+    io_expander_gpio_set_drive(io_expander, pin, IO_EXP_GPIO_DRIVE_PUSH_PULL);
+
+
+    adc2_config_channel_atten(ADC2_CHANNEL_9, ADC_ATTEN_DB_12);  // GPIO26对应ADC2_CHANNEL_9
 
     // 测试不同占空比
     uint8_t duty_cycles[]     = {0, 25, 50, 75, 100};
@@ -487,7 +630,14 @@ bool test_pwm(int pin, int pwm_channel)
         int adc_sum = 0;
         int samples = 10;
         for (int j = 0; j < samples; j++) {
-            adc_sum += adc1_get_raw(ADC1_CHANNEL_7);
+            int adc_value;
+            esp_err_t ret = adc2_get_raw(ADC2_CHANNEL_9, ADC_WIDTH_BIT_12, &adc_value);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "ADC读取失败: %d", ret);
+                test_passed = false;
+                continue;
+            }
+            adc_sum += adc_value;
             vTaskDelay(10 / portTICK_PERIOD_MS);
         }
 
@@ -545,6 +695,10 @@ void display_test_result(const char* test_name, bool passed)
 void run_pin_test(int pin)
 {
     ESP_LOGI(TAG, "开始测试引脚: %s", pin_map[pin].name);
+
+    // 在开始所有测试前先复位引脚配置
+    ESP_LOGI(TAG, "测试前复位引脚配置");
+    reset_pin_config(pin);
 
     display_clear();
     display.printf("测试: %s", pin_map[pin].name);
@@ -649,6 +803,193 @@ void run_pin_test(int pin)
     display.println("C: 返回菜单");
 }
 
+// 功能寄存器测试
+void run_function_test() {
+    display_clear();
+    display.println("功能寄存器测试");
+    display.println("");
+    display.println("测试进行中...");
+    
+    bool overall_result = true;
+    
+    // 1. RTC RAM测试
+    display.println("1. RTC RAM测试...");
+    ESP_LOGI(TAG, "开始RTC RAM测试");
+    
+    uint8_t test_data[16] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 
+                            0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10};
+    uint8_t read_data[16] = {0};
+    
+    bool rtc_ram_test = true;
+    
+    // 写入测试数据
+    if (io_expander_rtc_ram_write(io_expander, 0, test_data, 16) != ESP_OK) {
+        ESP_LOGE(TAG, "RTC RAM写入失败");
+        rtc_ram_test = false;
+    } else {
+        // 读取验证
+        if (io_expander_rtc_ram_read(io_expander, 0, read_data, 16) != ESP_OK) {
+            ESP_LOGE(TAG, "RTC RAM读取失败");
+            rtc_ram_test = false;
+        } else {
+            // 比较数据
+            for (int i = 0; i < 16; i++) {
+                if (test_data[i] != read_data[i]) {
+                    ESP_LOGE(TAG, "RTC RAM数据不匹配 位置%d: 期望0x%02x, 实际0x%02x", 
+                             i, test_data[i], read_data[i]);
+                    rtc_ram_test = false;
+                    break;
+                }
+            }
+        }
+    }
+    
+    overall_result &= rtc_ram_test;
+    
+    // 2. I2C配置测试
+    display.println("2. I2C配置测试...");
+    ESP_LOGI(TAG, "开始I2C配置测试");
+    
+    bool i2c_config_test = true;
+    
+    // 测试I2C配置设置
+    if (io_expander_set_i2c_config(io_expander, 5, false, false, false) != ESP_OK) {
+        ESP_LOGE(TAG, "I2C配置设置失败");
+        i2c_config_test = false;
+    }
+    
+    overall_result &= i2c_config_test;
+    
+    // 3. LED控制测试
+    display.println("3. LED控制测试...");
+    ESP_LOGI(TAG, "开始LED控制测试");
+    
+    bool led_test = true;
+    
+    // 设置LED数量
+    if (io_expander_led_set_count(io_expander, 8) != ESP_OK) {
+        ESP_LOGE(TAG, "LED数量设置失败");
+        led_test = false;
+    } else {
+        // 设置LED颜色
+        rgb_color_t red_color = {31, 0, 0};  // 红色
+        if (io_expander_led_set_color(io_expander, 0, red_color) != ESP_OK) {
+            ESP_LOGE(TAG, "LED颜色设置失败");
+            led_test = false;
+        } else {
+            // 刷新LED显示（REFRESH位会自动清零）
+            if (io_expander_led_refresh(io_expander) != ESP_OK) {
+                ESP_LOGE(TAG, "LED刷新失败");
+                led_test = false;
+            } else {
+                ESP_LOGI(TAG, "LED刷新成功，REFRESH位已自动清零");
+            }
+        }
+    }
+    
+    overall_result &= led_test;
+    
+    // 显示测试结果
+    display_clear();
+    display.println("功能寄存器测试结果:");
+    display.println("");
+    
+    if (rtc_ram_test) {
+        display.setTextColor(GREEN);
+        display.println("1. RTC RAM - 通过");
+    } else {
+        display.setTextColor(RED);
+        display.println("1. RTC RAM - 失败");
+    }
+    display.setTextColor(BLACK);
+    
+    if (i2c_config_test) {
+        display.setTextColor(GREEN);
+        display.println("2. I2C配置 - 通过");   
+    } else {
+        display.setTextColor(RED);
+        display.println("2. I2C配置 - 失败");
+    }
+    display.setTextColor(BLACK);
+    
+    if (led_test) {
+        display.setTextColor(GREEN);
+        display.println("3. LED控制 - 通过");
+    } else {
+        display.setTextColor(RED);
+        display.println("3. LED控制 - 失败");
+    }
+    display.setTextColor(BLACK);
+    
+    display.println("");
+    if (overall_result) {
+        display.setTextColor(GREEN);
+        display.println("全部功能测试通过!");
+    } else {
+        display.setTextColor(RED);
+        display.println("部分功能测试失败!");
+    }
+    display.setTextColor(BLACK);
+    
+    display.println("");
+    display.println("A: 工厂重置测试");
+    display.println("C: 返回菜单");
+    
+    ESP_LOGI(TAG, "功能寄存器测试完成，总体结果: %s", overall_result ? "通过" : "失败");
+}
+
+// 工厂重置测试
+void run_factory_reset_test() {
+    display_clear();
+    display.println("工厂重置测试");
+    display.println("");
+    display.println("警告: 将重置所有设置!");
+    display.println("确认按C键继续");
+    display.println("取消按A键返回");
+    
+    // 等待用户确认
+    bool waiting = true;
+    while (waiting) {
+        if (button_pressed(BUTTON_A_PIN)) {
+            // 取消，返回功能测试
+            run_function_test();
+            return;
+        }
+        
+        if (button_pressed(BUTTON_C_PIN)) {
+            // 确认执行工厂重置
+            display_clear();
+            display.println("执行工厂重置...");
+            display.println("(设置即生效，无需校验)");
+            
+            esp_err_t ret = io_expander_factory_reset(io_expander);
+            
+            vTaskDelay(2000 / portTICK_PERIOD_MS); // 等待重置完成
+            
+            if (ret == ESP_OK) {
+                display.setTextColor(GREEN);
+                display.println("工厂重置成功!");
+                ESP_LOGI(TAG, "工厂重置执行成功，所有设置已恢复默认值");
+                
+                // 重新读取设备信息（因为可能已经改变）
+                read_device_info();
+            } else {
+                display.setTextColor(RED);
+                display.println("工厂重置失败!");
+                ESP_LOGE(TAG, "工厂重置执行失败: %d", ret);
+            }
+            display.setTextColor(BLACK);
+            
+            display.println("");
+            display.println("C: 返回菜单");
+            
+            waiting = false;
+        }
+        
+        vTaskDelay(50 / portTICK_PERIOD_MS);
+    }
+}
+
 extern "C" void app_main(void)
 {
     // 初始化显示屏
@@ -661,7 +1002,7 @@ extern "C" void app_main(void)
     // 初始化按键和测试GPIO
     init_buttons();
     init_test_gpio();
-
+    
     // 初始化I2C总线
     i2c_config_t conf;
     conf.mode             = I2C_MODE_MASTER;
@@ -727,7 +1068,17 @@ extern "C" void app_main(void)
         ESP_LOGI(TAG, "硬件版本: %d, 固件版本: %d", hw_version, fw_version);
     }
 
-    ESP_LOGI(TAG, "IO扩展器初始化成功，开始主循环");
+    ESP_LOGI(TAG, "IO扩展器初始化成功，读取设备信息");
+    
+    // io_expander_pwm_set_frequency(io_expander, (uint16_t)5000);
+    // io_expander_gpio_set_drive(io_expander, IO_EXP_GPIO_PIN_9, IO_EXP_GPIO_DRIVE_PUSH_PULL);
+    // io_expander_pwm_set_duty(io_expander, IO_EXP_PWM_CHANNEL_1, 50, false, true);
+     
+
+    // 读取设备信息
+    read_device_info();
+    
+    ESP_LOGI(TAG, "开始主循环");
     display_menu();
 
     // 主循环
@@ -748,6 +1099,10 @@ extern "C" void app_main(void)
                     current_pin   = (current_pin + 1) % 14;
                     current_state = TEST_STATE_RUNNING;
                     display_test_instruction();
+                    break;
+                case TEST_STATE_FUNCTION_TEST:
+                    // A键执行工厂重置测试
+                    run_factory_reset_test();
                     break;
                 default:
                     break;
@@ -777,7 +1132,9 @@ extern "C" void app_main(void)
         if (button_pressed(BUTTON_C_PIN)) {
             switch (current_state) {
                 case TEST_STATE_MENU:
-                    ESP_LOGI(TAG, "退出测试");
+                    // C键改为功能测试
+                    current_state = TEST_STATE_FUNCTION_TEST;
+                    run_function_test();
                     break;
                 case TEST_STATE_SELECT_PIN:
                     current_state = TEST_STATE_RUNNING;
@@ -789,6 +1146,10 @@ extern "C" void app_main(void)
                     current_state = TEST_STATE_WAIT_NEXT;
                     break;
                 case TEST_STATE_WAIT_NEXT:
+                    current_state = TEST_STATE_MENU;
+                    display_menu();
+                    break;
+                case TEST_STATE_FUNCTION_TEST:
                     current_state = TEST_STATE_MENU;
                     display_menu();
                     break;

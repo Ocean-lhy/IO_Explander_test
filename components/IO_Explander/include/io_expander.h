@@ -344,6 +344,13 @@ esp_err_t io_expander_adc_read(io_expander_handle_t *handle, uint8_t channel, ui
  */
 esp_err_t io_expander_adc_is_busy(io_expander_handle_t *handle, bool *busy);
 
+/**
+ * @brief 禁用ADC功能
+ * @param handle 句柄
+ * @return ESP_OK成功，其他值失败
+ */
+esp_err_t io_expander_adc_disable(io_expander_handle_t *handle);
+
 // 温度传感器功能函数 (Temperature Sensor Functions)
 /**
  * @brief 读取温度
@@ -430,6 +437,14 @@ esp_err_t io_expander_led_set_color(io_expander_handle_t *handle, uint8_t led_in
  * @note 触发IO14(PB7)引脚输出Neopixel时序信号
  */
 esp_err_t io_expander_led_refresh(io_expander_handle_t *handle);
+
+/**
+ * @brief 禁用LED功能
+ * @param handle 句柄
+ * @return ESP_OK成功，其他值失败
+ * @note 禁用LED功能后，IO14(PB7)恢复为普通GPIO功能
+ */
+esp_err_t io_expander_led_disable(io_expander_handle_t *handle);
 
 // RTC RAM功能函数 (RTC RAM Functions)
 /**

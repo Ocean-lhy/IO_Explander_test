@@ -9,6 +9,7 @@
 | IO22       | SCL-PB3   | I2C SCL            |
 
 - 测试引脚
+| ESP32 引脚 | PY32 引脚 | 功能               |
 | IO26       | IO1-PB5   | GPIO               |
 | IO26       | IO2-PB1   | GPIO / ADC1        |
 | IO26       | IO3-PA1   | GPIO               |

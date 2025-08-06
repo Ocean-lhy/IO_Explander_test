@@ -73,10 +73,17 @@ static esp_err_t io_expander_write_reg(io_expander_handle_t *handle, uint8_t reg
         // 延时确保写入完成
         vTaskDelay(pdMS_TO_TICKS(5));
 
-        // 校验写入结果（部分只读寄存器跳过校验）
+        // 校验写入结果（特殊寄存器跳过或特殊处理）
         if (reg_addr == REG_UID_L || reg_addr == REG_UID_H || reg_addr == REG_VERSION || reg_addr == REG_GPIO_I_L ||
-            reg_addr == REG_GPIO_I_H || reg_addr == REG_GPIO_IS_L || reg_addr == REG_GPIO_IS_H) {
-            // 只读寄存器，跳过校验
+            reg_addr == REG_GPIO_I_H || reg_addr == REG_GPIO_IS_L || reg_addr == REG_GPIO_IS_H || 
+            reg_addr == REG_TEMP_D_L || reg_addr == REG_TEMP_D_H || reg_addr == REG_ADC_D_L || reg_addr == REG_ADC_D_H ||
+            reg_addr == REG_TEMP_CTRL || reg_addr == REG_FACTORY_RESET) {
+            // 只读寄存器、温度控制寄存器、重置寄存器，跳过校验
+            if (reg_addr == REG_TEMP_CTRL) {
+                ESP_LOGI(TAG, "温度控制寄存器: 写入成功，跳过校验(START位自动清零，BUSY位动态变化)");
+            } else if (reg_addr == REG_FACTORY_RESET) {
+                ESP_LOGI(TAG, "恢复出厂设置寄存器: 写入成功，跳过校验(设置即生效)");
+            }
             return ESP_OK;
         }
 
@@ -88,7 +95,26 @@ static esp_err_t io_expander_write_reg(io_expander_handle_t *handle, uint8_t reg
             continue;
         }
 
-        if (verify_data == data) {
+        // 自动清零寄存器特殊处理
+        bool verify_ok = false;
+        if (reg_addr == REG_LED_CFG) {
+            // LED配置：LED_CFG_REFRESH位(bit6)会自动清零，只校验其他位
+            uint8_t mask = ~LED_CFG_REFRESH; // 排除bit6
+            verify_ok = ((verify_data & mask) == (data & mask));
+            ESP_LOGI(TAG, "LED配置寄存器校验: 写入0x%02x, 读取0x%02x, 掩码0x%02x, 结果%s", 
+                     data, verify_data, mask, verify_ok ? "通过" : "失败");
+        } else if (reg_addr == REG_ADC_CTRL) {
+            // ADC控制：ADC_CTRL_START位(bit6)会自动清零，只校验其他位
+            uint8_t mask = ~ADC_CTRL_START; // 排除bit6
+            verify_ok = ((verify_data & mask) == (data & mask));
+            ESP_LOGI(TAG, "ADC控制寄存器校验: 写入0x%02x, 读取0x%02x, 掩码0x%02x, 结果%s", 
+                     data, verify_data, mask, verify_ok ? "通过" : "失败");
+        } else {
+            // 普通寄存器：完全匹配校验
+            verify_ok = (verify_data == data);
+        }
+
+        if (verify_ok) {
             // 校验成功
             return ESP_OK;
         } else {
@@ -145,8 +171,9 @@ static esp_err_t io_expander_write_16bit_reg(io_expander_handle_t *handle, uint8
         // 延时确保写入完成
         vTaskDelay(pdMS_TO_TICKS(5));
 
-        // 校验写入结果（只读寄存器跳过校验）
-        if (reg_addr_l == REG_GPIO_I_L || reg_addr_l == REG_GPIO_IS_L) {
+        // 校验写入结果（特殊寄存器跳过或特殊处理）
+        if (reg_addr_l == REG_GPIO_I_L || reg_addr_l == REG_GPIO_IS_L || 
+            reg_addr_l == REG_ADC_D_L || reg_addr_l == REG_TEMP_D_L) {
             // 只读寄存器，跳过校验
             return ESP_OK;
         }
@@ -159,6 +186,7 @@ static esp_err_t io_expander_write_16bit_reg(io_expander_handle_t *handle, uint8
             continue;
         }
 
+        // 16位寄存器通常不包含自动清零位，直接进行完全匹配校验
         if (verify_data == data) {
             // 校验成功
             return ESP_OK;
@@ -609,6 +637,20 @@ esp_err_t io_expander_adc_is_busy(io_expander_handle_t *handle, bool *busy)
     return ret;
 }
 
+/**
+ * @brief 禁用ADC功能
+ */
+esp_err_t io_expander_adc_disable(io_expander_handle_t *handle)
+{
+    if (handle == NULL || !handle->initialized) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 设置ADC控制寄存器为禁用状态（通道0，无启动位）
+    ESP_LOGI(TAG, "禁用ADC功能");
+    return io_expander_write_reg(handle, REG_ADC_CTRL, ADC_CHANNEL_DISABLE);
+}
+
 // 温度传感器功能函数 (Temperature Sensor Functions)
 
 /**
@@ -791,6 +833,20 @@ esp_err_t io_expander_led_refresh(io_expander_handle_t *handle)
 
     led_cfg |= LED_CFG_REFRESH;
     return io_expander_write_reg(handle, REG_LED_CFG, led_cfg);
+}
+
+/**
+ * @brief 禁用LED功能
+ */
+esp_err_t io_expander_led_disable(io_expander_handle_t *handle)
+{
+    if (handle == NULL || !handle->initialized) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 设置LED数量为0来禁用LED功能，恢复IO14(PB7)的普通GPIO功能
+    ESP_LOGI(TAG, "禁用LED功能，恢复IO14(PB7)普通GPIO功能");
+    return io_expander_write_reg(handle, REG_LED_CFG, 0);
 }
 
 // RTC RAM功能函数 (RTC RAM Functions)
