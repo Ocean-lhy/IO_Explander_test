@@ -261,11 +261,28 @@ void display_test_instruction()
     display_clear();
     display.printf("测试引脚: %s", pin_map[current_pin].name);
     display.println("");
-    display.println("请将该引脚连接到");
-    display.println("ESP32的GPIO26");
+    
+    if (pin_map[current_pin].has_led) {
+        display.println("LED测试无需连线");
+        display.println("将直接通过IO14控制");
+        display.println("32个Neopixel LED");
+    } else {
+        display.println("请将该引脚连接到");
+        display.println("ESP32的GPIO26");
+    }
+    
     display.println("");
-    display.println("连接完成后按C开始");
+    display.println("按C开始测试");
     display.println("按A跳过此引脚");
+}
+
+void display_skip_message()
+{
+    display_clear();
+    display.printf("已跳过: %s", pin_map[current_pin].name);
+    display.println("");
+    display.println("正在准备下一个引脚...");
+    vTaskDelay(1000 / portTICK_PERIOD_MS);  // 显示1秒
 }
 
 // GPIO基本测试
@@ -605,6 +622,7 @@ bool test_pwm(int pin, int pwm_channel)
     }
 
     // 设置PWM引脚推挽输出
+    io_expander_pwm_set_duty(io_expander, pwm_channel, 0, false, true);
     io_expander_gpio_set_drive(io_expander, pin, IO_EXP_GPIO_DRIVE_PUSH_PULL);
 
 
@@ -671,6 +689,140 @@ bool test_pwm(int pin, int pwm_channel)
         ESP_LOGI(TAG, "PWM测试通过");
     } else {
         ESP_LOGE(TAG, "PWM测试失败");
+    }
+
+    return test_passed;
+}
+
+// LED测试
+bool test_led(int pin)
+{
+    ESP_LOGI(TAG, "开始LED测试 - 引脚 %d", pin);
+    bool test_passed = true;
+
+    // 复位引脚配置
+    reset_pin_config(pin);
+
+    io_expander_gpio_set_drive(io_expander, pin, IO_EXP_GPIO_DRIVE_PUSH_PULL);
+
+    // 设置LED数量为32个
+    esp_err_t ret = io_expander_led_set_count(io_expander, 32);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "设置LED数量失败: %d", ret);
+        return false;
+    }
+    ESP_LOGI(TAG, "设置LED数量: 32个");
+
+    // 定义RGB三种基本颜色 (RGB565格式，5位红，6位绿，5位蓝)
+    rgb_color_t colors[3] = {
+        {31, 0, 0},   // 纯红色 (最大红色值)
+        {0, 63, 0},   // 纯绿色 (最大绿色值)
+        {0, 0, 31}    // 纯蓝色 (最大蓝色值)
+    };
+    
+    const char* color_names[3] = {"红色", "绿色", "蓝色"};
+
+    // 测试三种颜色
+    for (int color_idx = 0; color_idx < 3; color_idx++) {
+        ESP_LOGI(TAG, "测试%s显示...", color_names[color_idx]);
+
+        // 为所有32个LED设置相同的颜色
+        for (int led_idx = 0; led_idx < 32; led_idx++) {
+            ret = io_expander_led_set_color(io_expander, led_idx, colors[color_idx]);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "设置LED %d 颜色失败: %d", led_idx, ret);
+                test_passed = false;
+                continue;
+            }
+        }
+
+        // 刷新LED显示
+        ret = io_expander_led_refresh(io_expander);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "%s刷新失败: %d", color_names[color_idx], ret);
+            test_passed = false;
+        } else {
+            ESP_LOGI(TAG, "%s显示刷新成功", color_names[color_idx]);
+        }
+
+        // 保持显示3秒，便于观察
+        vTaskDelay(3000 / portTICK_PERIOD_MS);
+    }
+
+    // 测试渐变效果 - 每个LED显示不同颜色
+    ESP_LOGI(TAG, "测试渐变效果 - 红绿蓝渐变...");
+    
+    for (int led_idx = 0; led_idx < 32; led_idx++) {
+        rgb_color_t gradient_color;
+        
+        if (led_idx < 11) {
+            // 前11个LED：红色到绿色渐变
+            float ratio = (float)led_idx / 10.0f;
+            gradient_color.r = (uint16_t)(31 * (1.0f - ratio));
+            gradient_color.g = (uint16_t)(63 * ratio);
+            gradient_color.b = 0;
+        } else if (led_idx < 22) {
+            // 中间11个LED：绿色到蓝色渐变
+            float ratio = (float)(led_idx - 11) / 10.0f;
+            gradient_color.r = 0;
+            gradient_color.g = (uint16_t)(63 * (1.0f - ratio));
+            gradient_color.b = (uint16_t)(31 * ratio);
+        } else {
+            // 最后10个LED：蓝色到红色渐变
+            float ratio = (float)(led_idx - 22) / 9.0f;
+            gradient_color.r = (uint16_t)(31 * ratio);
+            gradient_color.g = 0;
+            gradient_color.b = (uint16_t)(31 * (1.0f - ratio));
+        }
+
+        ret = io_expander_led_set_color(io_expander, led_idx, gradient_color);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "设置LED %d 渐变颜色失败: %d", led_idx, ret);
+            test_passed = false;
+        }
+    }
+
+    // 刷新渐变效果
+    ret = io_expander_led_refresh(io_expander);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "渐变效果刷新失败: %d", ret);
+        test_passed = false;
+    } else {
+        ESP_LOGI(TAG, "渐变效果显示成功");
+    }
+
+    // 保持渐变显示3秒
+    vTaskDelay(3000 / portTICK_PERIOD_MS);
+
+    // 关闭所有LED
+    ESP_LOGI(TAG, "关闭所有LED...");
+    rgb_color_t off_color = {0, 0, 0};  // 黑色 = 关闭
+    
+    for (int led_idx = 0; led_idx < 32; led_idx++) {
+        ret = io_expander_led_set_color(io_expander, led_idx, off_color);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "关闭LED %d 失败: %d", led_idx, ret);
+            test_passed = false;
+        }
+    }
+
+    // 刷新显示关闭效果
+    ret = io_expander_led_refresh(io_expander);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "关闭LED刷新失败: %d", ret);
+        test_passed = false;
+    } else {
+        ESP_LOGI(TAG, "所有LED已关闭");
+    }
+
+    // 最后禁用LED功能，恢复GPIO功能
+    io_expander_led_disable(io_expander);
+    ESP_LOGI(TAG, "LED功能已禁用，IO14恢复GPIO功能");
+
+    if (test_passed) {
+        ESP_LOGI(TAG, "LED测试通过");
+    } else {
+        ESP_LOGE(TAG, "LED测试失败");
     }
 
     return test_passed;
@@ -783,6 +935,30 @@ void run_pin_test(int pin)
             display_test_result("4. ADC", adc_result);
         }
         display_test_result("5. PWM", pwm_result);
+    }
+
+    // 6. LED测试（如果支持）
+    bool led_result = true;  // 默认通过，如果不支持LED
+    if (pin_map[pin].has_led) {
+        display.println("6. LED测试...");
+        vTaskDelay(200 / portTICK_PERIOD_MS);
+        led_result = test_led(pin);
+        overall_result &= led_result;
+
+        // 更新显示
+        display_clear();
+        display.printf("测试: %s", pin_map[pin].name);
+        display.println("");
+        display_test_result("1. GPIO基本", gpio_result);
+        display_test_result("2. 上下拉", pull_result);
+        display_test_result("3. 中断", interrupt_result);
+        if (pin_map[pin].has_adc) {
+            display_test_result("4. ADC", adc_result);
+        }
+        if (pin_map[pin].has_pwm) {
+            display_test_result("5. PWM", pwm_result);
+        }
+        display_test_result("6. LED", led_result);
     }
 
     ESP_LOGI(TAG, "引脚 %s 测试完成，总体结果: %s", pin_map[pin].name, overall_result ? "通过" : "失败");
@@ -1069,11 +1245,6 @@ extern "C" void app_main(void)
     }
 
     ESP_LOGI(TAG, "IO扩展器初始化成功，读取设备信息");
-    
-    // io_expander_pwm_set_frequency(io_expander, (uint16_t)5000);
-    // io_expander_gpio_set_drive(io_expander, IO_EXP_GPIO_PIN_9, IO_EXP_GPIO_DRIVE_PUSH_PULL);
-    // io_expander_pwm_set_duty(io_expander, IO_EXP_PWM_CHANNEL_1, 50, false, true);
-     
 
     // 读取设备信息
     read_device_info();
@@ -1093,6 +1264,13 @@ extern "C" void app_main(void)
                 case TEST_STATE_SELECT_PIN:
                     current_pin = (current_pin - 1 + 14) % 14;
                     display_pin_select();
+                    break;
+                case TEST_STATE_RUNNING:
+                    // 跳过当前引脚测试，直接到下一个引脚
+                    ESP_LOGI(TAG, "跳过引脚 %s 的测试", pin_map[current_pin].name);
+                    display_skip_message();
+                    current_pin = (current_pin + 1) % 14;
+                    display_test_instruction();
                     break;
                 case TEST_STATE_WAIT_NEXT:
                     // 下一个引脚
