@@ -471,22 +471,76 @@ bool test_gpio_interrupt(int pin)
     io_expander_gpio_get_interrupt_status(io_expander, &interrupt_status_after);
     ESP_LOGI(TAG, "触发后中断状态: 0x%04x", interrupt_status_after);
 
-    // 校验中断是否被正确触发
+    // 校验下降沿中断是否被正确触发
     if (interrupt_status_after & (1 << pin)) {
-        ESP_LOGI(TAG, "中断触发成功！引脚 %d 的中断被检测到", pin);
+        ESP_LOGI(TAG, "下降沿中断触发成功！引脚 %d 的中断被检测到", pin);
         io_expander_gpio_clear_interrupt(io_expander, pin);
 
         // 验证中断清除
         uint16_t interrupt_status_cleared;
         io_expander_gpio_get_interrupt_status(io_expander, &interrupt_status_cleared);
         if (interrupt_status_cleared & (1 << pin)) {
-            ESP_LOGE(TAG, "中断清除失败！状态: 0x%04x", interrupt_status_cleared);
+            ESP_LOGE(TAG, "下降沿中断清除失败！状态: 0x%04x", interrupt_status_cleared);
             test_passed = false;
         } else {
-            ESP_LOGI(TAG, "中断清除成功");
+            ESP_LOGI(TAG, "下降沿中断清除成功");
         }
     } else {
-        ESP_LOGE(TAG, "中断触发失败！期望检测到中断，但状态为: 0x%04x", interrupt_status_after);
+        ESP_LOGE(TAG, "下降沿中断触发失败！期望检测到中断，但状态为: 0x%04x", interrupt_status_after);
+        test_passed = false;
+    }
+
+    // ==================== 上升沿中断测试 ====================
+    ESP_LOGI(TAG, "开始上升沿中断测试...");
+    
+    // 设置为输入模式并启用下拉
+    io_expander_gpio_set_mode(io_expander, pin, IO_EXP_GPIO_MODE_INPUT);
+    io_expander_gpio_set_pull(io_expander, pin, IO_EXP_GPIO_PULL_DOWN);
+    
+    // 清除之前的中断状态
+    io_expander_gpio_clear_interrupt(io_expander, pin);
+    
+    // 启用上升沿中断
+    io_expander_gpio_set_interrupt(io_expander, pin, IO_EXP_GPIO_INTR_RISING_EDGE);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+    
+    ESP_LOGI(TAG, "中断已设置为上升沿触发，通过GPIO26产生触发信号...");
+    
+    // 检查初始中断状态应该为0
+    uint16_t interrupt_status_before_rising;
+    io_expander_gpio_get_interrupt_status(io_expander, &interrupt_status_before_rising);
+    ESP_LOGI(TAG, "上升沿触发前中断状态: 0x%04x", interrupt_status_before_rising);
+    
+    // 通过GPIO26产生上升沿来触发中断
+    gpio_reset_pin(TEST_GPIO_PIN);
+    gpio_set_direction(TEST_GPIO_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(TEST_GPIO_PIN, 0);  // 先设置为低电平
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+    
+    gpio_set_level(TEST_GPIO_PIN, 1);      // 产生上升沿
+    vTaskDelay(200 / portTICK_PERIOD_MS);  // 等待中断处理
+    
+    // 检查中断状态
+    uint16_t interrupt_status_after_rising;
+    io_expander_gpio_get_interrupt_status(io_expander, &interrupt_status_after_rising);
+    ESP_LOGI(TAG, "上升沿触发后中断状态: 0x%04x", interrupt_status_after_rising);
+    
+    // 校验上升沿中断是否被正确触发
+    if (interrupt_status_after_rising & (1 << pin)) {
+        ESP_LOGI(TAG, "上升沿中断触发成功！引脚 %d 的中断被检测到", pin);
+        io_expander_gpio_clear_interrupt(io_expander, pin);
+
+        // 验证中断清除
+        uint16_t interrupt_status_cleared_rising;
+        io_expander_gpio_get_interrupt_status(io_expander, &interrupt_status_cleared_rising);
+        if (interrupt_status_cleared_rising & (1 << pin)) {
+            ESP_LOGE(TAG, "上升沿中断清除失败！状态: 0x%04x", interrupt_status_cleared_rising);
+            test_passed = false;
+        } else {
+            ESP_LOGI(TAG, "上升沿中断清除成功");
+        }
+    } else {
+        ESP_LOGE(TAG, "上升沿中断触发失败！期望检测到中断，但状态为: 0x%04x", interrupt_status_after_rising);
         test_passed = false;
     }
 
@@ -497,9 +551,9 @@ bool test_gpio_interrupt(int pin)
     io_expander_gpio_set_interrupt(io_expander, pin, IO_EXP_GPIO_INTR_DISABLE);
 
     if (test_passed) {
-        ESP_LOGI(TAG, "中断测试通过");
+        ESP_LOGI(TAG, "中断测试通过（下降沿 + 上升沿）");
     } else {
-        ESP_LOGE(TAG, "中断测试失败");
+        ESP_LOGE(TAG, "中断测试失败（下降沿 或 上升沿）");
     }
 
     return test_passed;

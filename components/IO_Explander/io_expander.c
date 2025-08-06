@@ -75,9 +75,9 @@ static esp_err_t io_expander_write_reg(io_expander_handle_t *handle, uint8_t reg
 
         // 校验写入结果（特殊寄存器跳过或特殊处理）
         if (reg_addr == REG_UID_L || reg_addr == REG_UID_H || reg_addr == REG_VERSION || reg_addr == REG_GPIO_I_L ||
-            reg_addr == REG_GPIO_I_H || reg_addr == REG_GPIO_IS_L || reg_addr == REG_GPIO_IS_H || 
-            reg_addr == REG_TEMP_D_L || reg_addr == REG_TEMP_D_H || reg_addr == REG_ADC_D_L || reg_addr == REG_ADC_D_H ||
-            reg_addr == REG_TEMP_CTRL || reg_addr == REG_FACTORY_RESET) {
+            reg_addr == REG_GPIO_I_H || reg_addr == REG_GPIO_IS_L || reg_addr == REG_GPIO_IS_H ||
+            reg_addr == REG_TEMP_D_L || reg_addr == REG_TEMP_D_H || reg_addr == REG_ADC_D_L ||
+            reg_addr == REG_ADC_D_H || reg_addr == REG_TEMP_CTRL || reg_addr == REG_FACTORY_RESET) {
             // 只读寄存器、温度控制寄存器、重置寄存器，跳过校验
             if (reg_addr == REG_TEMP_CTRL) {
                 ESP_LOGI(TAG, "温度控制寄存器: 写入成功，跳过校验(START位自动清零，BUSY位动态变化)");
@@ -99,16 +99,16 @@ static esp_err_t io_expander_write_reg(io_expander_handle_t *handle, uint8_t reg
         bool verify_ok = false;
         if (reg_addr == REG_LED_CFG) {
             // LED配置：LED_CFG_REFRESH位(bit6)会自动清零，只校验其他位
-            uint8_t mask = ~LED_CFG_REFRESH; // 排除bit6
-            verify_ok = ((verify_data & mask) == (data & mask));
-            ESP_LOGI(TAG, "LED配置寄存器校验: 写入0x%02x, 读取0x%02x, 掩码0x%02x, 结果%s", 
-                     data, verify_data, mask, verify_ok ? "通过" : "失败");
+            uint8_t mask = ~LED_CFG_REFRESH;  // 排除bit6
+            verify_ok    = ((verify_data & mask) == (data & mask));
+            ESP_LOGI(TAG, "LED配置寄存器校验: 写入0x%02x, 读取0x%02x, 掩码0x%02x, 结果%s", data, verify_data, mask,
+                     verify_ok ? "通过" : "失败");
         } else if (reg_addr == REG_ADC_CTRL) {
             // ADC控制：ADC_CTRL_START位(bit6)会自动清零，只校验其他位
-            uint8_t mask = ~ADC_CTRL_START; // 排除bit6
-            verify_ok = ((verify_data & mask) == (data & mask));
-            ESP_LOGI(TAG, "ADC控制寄存器校验: 写入0x%02x, 读取0x%02x, 掩码0x%02x, 结果%s", 
-                     data, verify_data, mask, verify_ok ? "通过" : "失败");
+            uint8_t mask = ~ADC_CTRL_START;  // 排除bit6
+            verify_ok    = ((verify_data & mask) == (data & mask));
+            ESP_LOGI(TAG, "ADC控制寄存器校验: 写入0x%02x, 读取0x%02x, 掩码0x%02x, 结果%s", data, verify_data, mask,
+                     verify_ok ? "通过" : "失败");
         } else {
             // 普通寄存器：完全匹配校验
             verify_ok = (verify_data == data);
@@ -172,8 +172,8 @@ static esp_err_t io_expander_write_16bit_reg(io_expander_handle_t *handle, uint8
         vTaskDelay(pdMS_TO_TICKS(5));
 
         // 校验写入结果（特殊寄存器跳过或特殊处理）
-        if (reg_addr_l == REG_GPIO_I_L || reg_addr_l == REG_GPIO_IS_L || 
-            reg_addr_l == REG_ADC_D_L || reg_addr_l == REG_TEMP_D_L) {
+        if (reg_addr_l == REG_GPIO_I_L || reg_addr_l == REG_GPIO_IS_L || reg_addr_l == REG_ADC_D_L ||
+            reg_addr_l == REG_TEMP_D_L) {
             // 只读寄存器，跳过校验
             return ESP_OK;
         }
